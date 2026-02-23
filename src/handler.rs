@@ -93,11 +93,7 @@ pub async fn firewall_handler(
 
                 if state.ban_cache.contains_key(&full_cache_key) {
                     warn!("Bloqueado por cuarentena: {}", full_cache_key);
-                    return Ok((
-                        StatusCode::FORBIDDEN,
-                        "Acceso denegado. Se ha detectado comportamiento abusivo.",
-                    )
-                        .into_response());
+                    return Ok((StatusCode::TOO_MANY_REQUESTS, "").into_response());
                 }
 
                 if rule.limiter.check_key(&full_cache_key).is_err() {
@@ -118,11 +114,7 @@ pub async fn firewall_handler(
                         .insert(full_cache_key.clone(), duration)
                         .await;
 
-                    return Ok((
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "Has excedido el límite de peticiones permitidas.",
-                    )
-                        .into_response());
+                    return Ok((StatusCode::TOO_MANY_REQUESTS, "").into_response());
                 }
                 break;
             }

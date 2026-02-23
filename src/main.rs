@@ -39,7 +39,7 @@ async fn main() {
         .layer(TraceLayer::new_for_http()) // Genera logs automáticos con tiempos de respuesta
         .layer(CatchPanicLayer::new()); // Evita que un error inesperado tire el servidor
 
-    let port = 8080;
+    let port = 9090;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
