@@ -1,0 +1,27 @@
+{
+    "backend_url": "http://127.0.0.1:3000",
+    "global_whitelist": ["127.0.0.1"],
+    "rules": [
+        {
+            "path_prefix": "/api/login",
+            "identifiers": ["ip"],
+            "limit": 3,
+            "window_secs": 15,
+            "on_limit_exceeded": { "duration_secs": 900 } 
+        },
+        {
+            "path_prefix": "/api/private",
+            "identifiers": ["header:authorization"],
+            "limit": 50,
+            "window_secs": 1,
+            "on_limit_exceeded": { "duration_secs": 5 }
+        },
+        {
+            "path_prefix": "/",
+            "identifiers": ["*"],
+            "limit": 1000,
+            "window_secs": 1,
+            "on_limit_exceeded": { "duration_secs": 10 }
+        }
+    ]
+}
