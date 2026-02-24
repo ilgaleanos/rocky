@@ -10,7 +10,7 @@ use axum::{http::StatusCode, routing::get, Router};
 use std::net::SocketAddr;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() {
@@ -20,10 +20,22 @@ async fn main() {
     info!("🚀 Iniciando Firewall de Alto Rendimiento...");
 
     // 2. CARGA DE CONFIGURACIÓN
-    let config = AppConfig::load("config.json").unwrap_or_else(|_| {
-        info!("⚠️ No se encontró config.json, usando configuración por defecto.");
-        AppConfig::default_mock()
-    });
+    // Distinguimos entre archivo no encontrado y errores de parseo para no silenciar bugs.
+    let config = match AppConfig::load("config.json") {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let err_str = e.to_string();
+            if err_str.contains("No such file") || err_str.contains("os error 2") {
+                info!("⚠️ No se encontró config.json, usando configuración por defecto.");
+            } else {
+                warn!(
+                    "❌ Error al parsear config.json: {}. Usando configuración por defecto.",
+                    e
+                );
+            }
+            AppConfig::default_mock()
+        }
+    };
 
     info!("🎯 Backend objetivo: {}", config.backend_url);
     info!("📜 Reglas cargadas: {}", config.rules.len());
@@ -31,7 +43,22 @@ async fn main() {
     // 3. ESTADO COMPARTIDO
     let state = AppState::new(config);
 
-    // 4. ENRUTADOR
+    // 4. TAREA DE LIMPIEZA DEL RATE LIMITER (anti memory-leak)
+    // governor/DashMap no elimina keys antiguas automáticamente; retain_recent() poda las caducadas.
+    {
+        let state_for_cleanup = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                for rule in &state_for_cleanup.rules {
+                    rule.limiter.retain_recent();
+                }
+            }
+        });
+    }
+
+    // 5. ENRUTADOR
     let app = Router::new()
         .route("/health", get(|| async { (StatusCode::OK, "OK") }))
         .fallback(firewall_handler)
@@ -45,7 +72,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     info!("🛡️  Servidor listo en {}", addr);
 
-    // 5. APAGADO (Graceful Shutdown)
+    // 6. APAGADO (Graceful Shutdown)
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

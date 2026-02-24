@@ -4,7 +4,11 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 use tracing::{info, warn};
 
 // Lista de cabeceras Hop-by-Hop que no deben cruzar el proxy ---
@@ -32,9 +36,10 @@ fn get_real_ip(headers: &HeaderMap, socket_addr: &SocketAddr) -> String {
     // Verificamos si la conexión directa viene de una red de confianza (loopback o privada).
     // Si viene de Internet público, NO confiamos en los headers.
     let is_trusted_proxy = direct_ip.is_loopback()
-        || direct_ip.to_string().starts_with("10.")
-        || direct_ip.to_string().starts_with("192.168.")
-        || direct_ip.to_string().starts_with("172.");
+        || match direct_ip {
+            IpAddr::V4(ipv4) => ipv4.is_private(),
+            IpAddr::V6(_) => false,
+        };
 
     if is_trusted_proxy {
         if let Some(x_forwarded) = headers.get("x-forwarded-for") {
@@ -69,6 +74,12 @@ pub async fn firewall_handler(
 
     // FIX 3: Limpiamos cabeceras de red antes de enviarlas al backend
     clean_hop_by_hop_headers(&mut headers);
+
+    // Inyectamos adecuadamente la IP real del cliente al backend
+    if let Ok(ip_val) = axum::http::HeaderValue::from_str(&client_ip) {
+        headers.insert("x-forwarded-for", ip_val.clone());
+        headers.insert("x-real-ip", ip_val);
+    }
 
     // --- 1. LÓGICA DEL FIREWALL (Rate limiting y baneos) ---
     if !state.whitelist.contains(&client_ip) {
@@ -125,10 +136,11 @@ pub async fn firewall_handler(
 
     // FIX 2: Evitamos la doble barra "/" limpiando el final de la URL del backend
     let base_url = state.backend_url.trim_end_matches('/');
+    let clean_path = path.trim_start_matches('/');
     let backend_url = if query.is_empty() {
-        format!("{}{}", base_url, path)
+        format!("{}/{}", base_url, clean_path)
     } else {
-        format!("{}{}?{}", base_url, path, query)
+        format!("{}/{}?{}", base_url, clean_path, query)
     };
 
     // MEJORA: Streaming puro de subida

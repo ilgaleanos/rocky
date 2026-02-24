@@ -1,6 +1,6 @@
 {
     "backend_url": "http://localhost:8080",
-    "global_whitelist": ["localhost"],
+    "global_whitelist": ["127.0.0.1", "::1"],
     "rules": [
         {
             "path_prefix": "/admin/auth",

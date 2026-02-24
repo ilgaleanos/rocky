@@ -56,7 +56,7 @@ impl AppState {
 
         let mut active_rules = Vec::new();
         for rule_config in config.rules {
-            active_rules.push(ActiveRule::new(rule_config));
+            active_rules.push(ActiveRule::new(rule_config).unwrap());
         }
 
         // 2. CACHÉ DE BANEOS: Usamos Moka con la política de expiración personalizada.
@@ -68,7 +68,6 @@ impl AppState {
         // 4. CLIENTE HTTP PROFESIONAL: Configuración con Timeouts y Pool de conexiones.
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10)) // No esperar más de 10s para conectar.
-            .timeout(Duration::from_secs(60)) // Tiempo máximo total de la petición.
             .pool_idle_timeout(Duration::from_secs(90)) // Reutilizar conexiones para bajar latencia.
             .tcp_nodelay(true) // Optimizar para baja latencia (desactiva algoritmo de Nagle).
             .danger_accept_invalid_certs(false) // Mantener seguridad SSL estricta.

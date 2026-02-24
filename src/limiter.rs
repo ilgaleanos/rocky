@@ -1,9 +1,5 @@
 use crate::config::RuleConfig;
-use governor::{
-    clock::DefaultClock,
-    state::keyed::DefaultKeyedStateStore,
-    Quota, RateLimiter,
-};
+use governor::{clock::DefaultClock, state::keyed::DefaultKeyedStateStore, Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -18,13 +14,23 @@ pub struct ActiveRule {
 
 impl ActiveRule {
     /// Construye una nueva regla activa inicializando el limitador Token Bucket.
-    pub fn new(config: RuleConfig) -> Self {
+    pub fn new(config: RuleConfig) -> Result<Self, String> {
         let quota = Quota::with_period(Duration::from_secs(config.window_secs))
-            .expect("El periodo de la ventana debe ser válido")
-            .allow_burst(NonZeroU32::new(config.limit).expect("El límite debe ser mayor a 0"));
+            .ok_or_else(|| {
+                format!(
+                    "El periodo de la ventana ({}s) es inválido para la ruta '{}'",
+                    config.window_secs, config.path_prefix
+                )
+            })?
+            .allow_burst(NonZeroU32::new(config.limit).ok_or_else(|| {
+                format!(
+                    "El límite ({}) es inválido (debe ser mayor a 0) para la ruta '{}'",
+                    config.limit, config.path_prefix
+                )
+            })?);
 
         let limiter = RateLimiter::dashmap(quota);
 
-        Self { config, limiter }
+        Ok(Self { config, limiter })
     }
 }
