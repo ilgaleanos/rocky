@@ -33,11 +33,12 @@ fn clean_hop_by_hop_headers(headers: &mut HeaderMap) {
 fn get_real_ip(headers: &HeaderMap, socket_addr: &SocketAddr) -> String {
     let direct_ip = socket_addr.ip();
 
-    // Verificamos si la conexión directa viene de una red de confianza (loopback o privada).
+    // Verificamos si la conexión directa viene de una red de confianza (loopback, privada o link-local).
+    // GCP Cloud Run usa IPs de link-local (169.254.x.x) para sus proxies.
     // Si viene de Internet público, NO confiamos en los headers.
     let is_trusted_proxy = direct_ip.is_loopback()
         || match direct_ip {
-            IpAddr::V4(ipv4) => ipv4.is_private(),
+            IpAddr::V4(ipv4) => ipv4.is_private() || ipv4.is_link_local(),
             IpAddr::V6(_) => false,
         };
 
@@ -45,19 +46,37 @@ fn get_real_ip(headers: &HeaderMap, socket_addr: &SocketAddr) -> String {
         if let Some(x_forwarded) = headers.get("x-forwarded-for") {
             if let Ok(ip_str) = x_forwarded.to_str() {
                 if let Some(real_ip) = ip_str.split(',').next() {
-                    return real_ip.trim().to_string();
+                    let final_ip = real_ip.trim().to_string();
+                    tracing::debug!(
+                        "get_real_ip proxy (trusted {}): Obteniendo X-Forwarded-For => {}",
+                        direct_ip,
+                        final_ip
+                    );
+                    return final_ip;
                 }
             }
         }
         if let Some(x_real_ip) = headers.get("x-real-ip") {
             if let Ok(ip_str) = x_real_ip.to_str() {
-                return ip_str.trim().to_string();
+                let final_ip = ip_str.trim().to_string();
+                tracing::debug!(
+                    "get_real_ip proxy (trusted {}): Obteniendo X-Real-Ip => {}",
+                    direct_ip,
+                    final_ip
+                );
+                return final_ip;
             }
         }
     }
 
     // Si no es un proxy de confianza, devolvemos la IP de la conexión de red directa.
-    direct_ip.to_string()
+    let final_ip = direct_ip.to_string();
+    tracing::debug!(
+        "get_real_ip fallback: Usando direct_ip: {} porque el proxy no era de confianza ({:?})",
+        final_ip,
+        direct_ip
+    );
+    final_ip
 }
 
 pub async fn firewall_handler(
@@ -82,7 +101,12 @@ pub async fn firewall_handler(
     }
 
     // --- 1. LÓGICA DEL FIREWALL (Rate limiting y baneos) ---
-    if !state.whitelist.contains(&client_ip) {
+    let is_whitelisted = client_ip
+        .parse::<std::net::IpAddr>()
+        .map(|ip| state.whitelist.iter().any(|net| net.contains(&ip)))
+        .unwrap_or(false);
+
+    if !is_whitelisted {
         for rule in &state.rules {
             if path.starts_with(&rule.config.path_prefix) {
                 let mut cache_key = String::new();

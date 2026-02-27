@@ -1,8 +1,9 @@
 use crate::config::AppConfig;
 use crate::limiter::ActiveRule;
+use ipnet::IpNet;
 use moka::future::Cache;
 use moka::Expiry;
-use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,7 +41,7 @@ impl Expiry<String, Duration> for BanExpiry {
 // --- ESTADO GLOBAL DE LA APLICACIÓN ---
 pub struct AppState {
     pub backend_url: String,
-    pub whitelist: HashSet<String>,
+    pub whitelist: Vec<IpNet>,
     pub rules: Vec<ActiveRule>,
     pub ban_cache: Cache<String, Duration>,
     pub client: reqwest::Client,
@@ -62,8 +63,21 @@ impl AppState {
         // 2. CACHÉ DE BANEOS: Usamos Moka con la política de expiración personalizada.
         let ban_cache: Cache<String, Duration> = Cache::builder().expire_after(BanExpiry).build();
 
-        // 3. WHITELIST: Convertimos el array a un HashSet para búsquedas O(1) ultra rápidas.
-        let whitelist: HashSet<String> = config.global_whitelist.into_iter().collect();
+        // 3. WHITELIST: Convertimos el array a subredes (IpNet).
+        let mut whitelist = Vec::new();
+        for ip_str in config.global_whitelist {
+            if ip_str.contains('/') {
+                match ip_str.parse::<IpNet>() {
+                    Ok(net) => whitelist.push(net),
+                    Err(e) => tracing::warn!("⚠️ CIDR inválido en whitelist '{}': {}", ip_str, e),
+                }
+            } else {
+                match ip_str.parse::<IpAddr>() {
+                    Ok(ip) => whitelist.push(IpNet::from(ip)),
+                    Err(e) => tracing::warn!("⚠️ IP inválida en whitelist '{}': {}", ip_str, e),
+                }
+            }
+        }
 
         // 4. CLIENTE HTTP PROFESIONAL: Configuración con Timeouts y Pool de conexiones.
         let client = reqwest::Client::builder()
