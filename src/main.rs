@@ -10,7 +10,7 @@ use axum::{http::StatusCode, routing::get, Router};
 use std::net::SocketAddr;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() {
@@ -20,20 +20,22 @@ async fn main() {
     info!("🚀 Iniciando Firewall de Alto Rendimiento...");
 
     // 2. CARGA DE CONFIGURACIÓN
-    // Distinguimos entre archivo no encontrado y errores de parseo para no silenciar bugs.
+    // Solo usamos fallback si el archivo no existe; errores de parseo deben frenar el arranque.
     let config = match AppConfig::load("config.json") {
         Ok(cfg) => cfg,
         Err(e) => {
-            let err_str = e.to_string();
-            if err_str.contains("No such file") || err_str.contains("os error 2") {
+            let is_not_found = e
+                .downcast_ref::<std::io::Error>()
+                .map(|ioe| ioe.kind() == std::io::ErrorKind::NotFound)
+                .unwrap_or(false);
+
+            if is_not_found {
                 info!("⚠️ No se encontró config.json, usando configuración por defecto.");
+                AppConfig::default_mock()
             } else {
-                warn!(
-                    "❌ Error al parsear config.json: {}. Usando configuración por defecto.",
-                    e
-                );
+                error!("❌ Error de configuración en config.json: {}", e);
+                std::process::exit(1);
             }
-            AppConfig::default_mock()
         }
     };
 
