@@ -31,23 +31,4 @@ impl AppConfig {
         let config: AppConfig = serde_json::from_str(&contents)?;
         Ok(config)
     }
-
-    pub fn default_mock() -> Self {
-        let json = r#"
-        {
-            "backend_url": "http://127.0.0.1:8080",
-            "global_whitelist": ["127.0.0.1", "10.0.0.5", "192.168.1.50"],
-            "rules": [
-                {
-                    "path_prefix": "/",
-                    "identifiers": ["*"],
-                    "limit": 1,
-                    "window_secs": 1,
-                    "on_limit_exceeded": { "duration_secs": 10 }
-                }
-            ]
-        }
-        "#;
-        serde_json::from_str(json).expect("Error parseando JSON mock")
-    }
 }

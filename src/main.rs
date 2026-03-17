@@ -6,7 +6,7 @@ mod state;
 use crate::config::AppConfig;
 use crate::handler::firewall_handler;
 use crate::state::AppState;
-use axum::{http::StatusCode, routing::get, Router};
+use axum::{extract::DefaultBodyLimit, http::StatusCode, routing::get, Router};
 use std::net::SocketAddr;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
@@ -24,18 +24,8 @@ async fn main() {
     let config = match AppConfig::load("config.json") {
         Ok(cfg) => cfg,
         Err(e) => {
-            let is_not_found = e
-                .downcast_ref::<std::io::Error>()
-                .map(|ioe| ioe.kind() == std::io::ErrorKind::NotFound)
-                .unwrap_or(false);
-
-            if is_not_found {
-                info!("⚠️ No se encontró config.json, usando configuración por defecto.");
-                AppConfig::default_mock()
-            } else {
-                error!("❌ Error de configuración en config.json: {}", e);
-                std::process::exit(1);
-            }
+            error!("❌ Error cargando config.json: {}", e);
+            std::process::exit(1);
         }
     };
 
@@ -65,6 +55,7 @@ async fn main() {
         .route("/health", get(|| async { (StatusCode::OK, "OK") }))
         .fallback(firewall_handler)
         .with_state(state)
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // Límite de 100 MB por request
         .layer(TraceLayer::new_for_http()) // Genera logs automáticos con tiempos de respuesta
         .layer(CatchPanicLayer::new()); // Evita que un error inesperado tire el servidor
 

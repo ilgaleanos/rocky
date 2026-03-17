@@ -3,6 +3,7 @@ use crate::limiter::ActiveRule;
 use ipnet::IpNet;
 use moka::future::Cache;
 use moka::Expiry;
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,7 +42,9 @@ impl Expiry<String, Duration> for BanExpiry {
 // --- ESTADO GLOBAL DE LA APLICACIÓN ---
 pub struct AppState {
     pub backend_url: String,
-    pub whitelist: Vec<IpNet>,
+    pub backend_host_header: Option<axum::http::HeaderValue>,
+    pub whitelist_ips: HashSet<IpAddr>,
+    pub whitelist_nets: Vec<IpNet>,
     pub rules: Vec<ActiveRule>,
     pub ban_cache: Cache<String, Duration>,
     pub client: reqwest::Client,
@@ -61,19 +64,23 @@ impl AppState {
         }
 
         // 2. CACHÉ DE BANEOS: Usamos Moka con la política de expiración personalizada.
-        let ban_cache: Cache<String, Duration> = Cache::builder().expire_after(BanExpiry).build();
+        let ban_cache: Cache<String, Duration> = Cache::builder()
+            .max_capacity(70_000)
+            .expire_after(BanExpiry)
+            .build();
 
-        // 3. WHITELIST: Convertimos el array a subredes (IpNet).
-        let mut whitelist = Vec::new();
+        // 3. WHITELIST: IPs exactas en HashSet (O(1)), rangos CIDR en Vec.
+        let mut whitelist_ips = HashSet::new();
+        let mut whitelist_nets = Vec::new();
         for ip_str in config.global_whitelist {
             if ip_str.contains('/') {
                 match ip_str.parse::<IpNet>() {
-                    Ok(net) => whitelist.push(net),
+                    Ok(net) => whitelist_nets.push(net),
                     Err(e) => tracing::warn!("⚠️ CIDR inválido en whitelist '{}': {}", ip_str, e),
                 }
             } else {
                 match ip_str.parse::<IpAddr>() {
-                    Ok(ip) => whitelist.push(IpNet::from(ip)),
+                    Ok(ip) => { whitelist_ips.insert(ip); }
                     Err(e) => tracing::warn!("⚠️ IP inválida en whitelist '{}': {}", ip_str, e),
                 }
             }
@@ -82,15 +89,32 @@ impl AppState {
         // 4. CLIENTE HTTP PROFESIONAL: Configuración con Timeouts y Pool de conexiones.
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10)) // No esperar más de 10s para conectar.
+            .read_timeout(Duration::from_secs(30)) // Timeout por cada lectura individual del backend.
             .pool_idle_timeout(Duration::from_secs(90)) // Reutilizar conexiones para bajar latencia.
             .tcp_nodelay(true) // Optimizar para baja latencia (desactiva algoritmo de Nagle).
             .danger_accept_invalid_certs(false) // Mantener seguridad SSL estricta.
             .build()
             .expect("No se pudo inicializar el cliente HTTP");
 
+        // Pre-parseo del Host header del backend (evita parsear la URL en cada request)
+        let backend_host_header = url::Url::parse(&config.backend_url)
+            .ok()
+            .and_then(|u| {
+                u.host_str().map(|host| {
+                    if let Some(port) = u.port() {
+                        format!("{}:{}", host, port)
+                    } else {
+                        host.to_string()
+                    }
+                })
+            })
+            .and_then(|h| axum::http::HeaderValue::from_str(&h).ok());
+
         Arc::new(Self {
             backend_url: config.backend_url,
-            whitelist,
+            backend_host_header,
+            whitelist_ips,
+            whitelist_nets,
             rules: active_rules,
             ban_cache,
             client,

@@ -13,13 +13,12 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY config.json ./
 
 RUN cargo build --release
 
 # --- Etapa 2: Imagen de Ejecución (Runtime) ---
 # Usamos la imagen base de Alpine, que pesa solo ~5 MB
-FROM alpine:latest
+FROM alpine:3.21
 
 # Añadimos los certificados raíz para que reqwest pueda hacer peticiones HTTPS sin fallar
 RUN apk add --no-cache ca-certificates tzdata \
@@ -32,7 +31,7 @@ WORKDIR /app
 COPY --from=builder /app/target/release/rocky ./firewall
 
 # Copiamos la configuración
-COPY config.json ./
+COPY configs/config-ai.json ./config.json
 
 EXPOSE 9090
 
