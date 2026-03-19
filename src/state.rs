@@ -89,7 +89,7 @@ impl AppState {
         // 4. CLIENTE HTTP PROFESIONAL: Configuración con Timeouts y Pool de conexiones.
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10)) // No esperar más de 10s para conectar.
-            .read_timeout(Duration::from_secs(30)) // Timeout por cada lectura individual del backend.
+            .timeout(Duration::from_secs(3600)) // Timeout total por request (incluye respuesta completa).
             .pool_idle_timeout(Duration::from_secs(90)) // Reutilizar conexiones para bajar latencia.
             .tcp_nodelay(true) // Optimizar para baja latencia (desactiva algoritmo de Nagle).
             .danger_accept_invalid_certs(false) // Mantener seguridad SSL estricta.
