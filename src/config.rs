@@ -9,7 +9,6 @@ pub struct BanConfig {
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct RuleConfig {
-    pub path_prefix: String,
     pub identifiers: Vec<String>,
     pub limit: u32,
     pub window_secs: u64,
@@ -17,11 +16,16 @@ pub struct RuleConfig {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+pub struct RouteConfig {
+    pub path: String,
+    pub rules: Vec<RuleConfig>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
 pub struct AppConfig {
     pub backend_url: String,
-    // Agregamos el campo para leer el array de IPs desde el JSON
-    pub global_whitelist: Vec<String>, 
-    pub rules: Vec<RuleConfig>,
+    pub global_whitelist: Vec<String>,
+    pub routes: Vec<RouteConfig>,
 }
 
 impl AppConfig {

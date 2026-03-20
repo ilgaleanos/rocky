@@ -30,7 +30,7 @@ async fn main() {
     };
 
     info!("🎯 Backend objetivo: {}", config.backend_url);
-    info!("📜 Reglas cargadas: {}", config.rules.len());
+    info!("📜 Rutas cargadas: {}", config.routes.len());
 
     // 3. ESTADO COMPARTIDO
     let state = AppState::new(config);
@@ -43,8 +43,10 @@ async fn main() {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                for rule in &state_for_cleanup.rules {
-                    rule.limiter.retain_recent();
+                for route in &state_for_cleanup.routes {
+                    for rule in &route.rules {
+                        rule.limiter.retain_recent();
+                    }
                 }
             }
         });

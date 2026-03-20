@@ -1,55 +1,83 @@
 {
   "backend_url": "http://localhost:8080",
   "global_whitelist": ["127.0.0.1", "169.254.0.0/16", "::1"],
-  "rules": [
+  "routes": [
     {
-      "path_prefix": "/v1/apagado_qr_generar",
-      "identifiers": ["ip"],
-      "limit": 5,
-      "window_secs": 3600,
-      "on_limit_exceeded": { "duration_secs": 86400 }
+      "path": "/v1/apagado_qr_generar",
+      "rules": [
+        {
+          "identifiers": ["ip"],
+          "limit": 5,
+          "window_secs": 3600,
+          "on_limit_exceeded": { "duration_secs": 86400 }
+        }
+      ]
     },
     {
-      "path_prefix": "/v1/apagado_qr_login",
-      "identifiers": ["ip"],
-      "limit": 5,
-      "window_secs": 3600,
-      "on_limit_exceeded": { "duration_secs": 86400 }
+      "path": "/v1/apagado_qr_login",
+      "rules": [
+        {
+          "identifiers": ["ip"],
+          "limit": 5,
+          "window_secs": 3600,
+          "on_limit_exceeded": { "duration_secs": 86400 }
+        }
+      ]
     },
     {
-      "path_prefix": "/v1/cuenta",
-      "identifiers": ["ip"],
-      "limit": 50,
-      "window_secs": 86400,
-      "on_limit_exceeded": { "duration_secs": 86400 }
+      "path": "/v1/cuenta/**",
+      "rules": [
+        {
+          "identifiers": ["ip"],
+          "limit": 50,
+          "window_secs": 86400,
+          "on_limit_exceeded": { "duration_secs": 86400 }
+        }
+      ]
     },
     {
-      "path_prefix": "/v1/validar/",
-      "identifiers": ["ip"],
-      "limit": 50,
-      "window_secs": 86400,
-      "on_limit_exceeded": { "duration_secs": 86400 }
+      "path": "/v1/validar/**",
+      "rules": [
+        {
+          "identifiers": ["ip"],
+          "limit": 50,
+          "window_secs": 86400,
+          "on_limit_exceeded": { "duration_secs": 86400 }
+        }
+      ]
     },
     {
-      "path_prefix": "/v1/generar_otp",
-      "identifiers": ["ip"],
-      "limit": 75,
-      "window_secs": 86400,
-      "on_limit_exceeded": { "duration_secs": 86400 }
+      "path": "/v1/generar_otp",
+      "rules": [
+        {
+          "identifiers": ["ip"],
+          "limit": 75,
+          "window_secs": 86400,
+          "on_limit_exceeded": { "duration_secs": 86400 }
+        }
+      ]
     },
     {
-      "path_prefix": "/v1/generar_token",
-      "identifiers": ["ip"],
-      "limit": 75,
-      "window_secs": 86400,
-      "on_limit_exceeded": { "duration_secs": 86400 }
+      "path": "/v1/generar_token",
+      "rules": [
+        {
+          "identifiers": ["ip"],
+          "limit": 75,
+          "window_secs": 86400,
+          "on_limit_exceeded": { "duration_secs": 86400 }
+        }
+      ]
     },
     {
-      "path_prefix": "/",
-      "identifiers": ["ip"],
-      "limit": 80,
-      "window_secs": 1,
-      "on_limit_exceeded": { "duration_secs": 10 }
+      "path": "/**",
+      "rules": [
+        {
+          "identifiers": ["ip"],
+          "limit": 80,
+          "window_secs": 1,
+          "on_limit_exceeded": { "duration_secs": 10 }
+        }
+      ]
     }
   ]
 }

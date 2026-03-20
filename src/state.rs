@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::limiter::ActiveRule;
+use crate::limiter::ActiveRoute;
 use ipnet::IpNet;
 use moka::future::Cache;
 use moka::Expiry;
@@ -45,22 +45,24 @@ pub struct AppState {
     pub backend_host_header: Option<axum::http::HeaderValue>,
     pub whitelist_ips: HashSet<IpAddr>,
     pub whitelist_nets: Vec<IpNet>,
-    pub rules: Vec<ActiveRule>,
+    pub routes: Vec<ActiveRoute>,
     pub ban_cache: Cache<String, Duration>,
     pub client: reqwest::Client,
 }
 
 impl AppState {
-    pub fn new(mut config: AppConfig) -> Arc<Self> {
-        // 1. ORDENAMIENTO DE REGLAS: Priorizamos las rutas más específicas (más largas)
-        // para que "/api/login" se evalúe antes que "/".
-        config
-            .rules
-            .sort_by(|a, b| b.path_prefix.len().cmp(&a.path_prefix.len()));
-
-        let mut active_rules = Vec::new();
-        for rule_config in config.rules {
-            active_rules.push(ActiveRule::new(rule_config).unwrap());
+    pub fn new(config: AppConfig) -> Arc<Self> {
+        // 1. CONSTRUCCIÓN DE RUTAS ACTIVAS
+        // Todas las rutas que matcheen se evalúan, no se necesita ordenar por especificidad.
+        let mut active_routes = Vec::new();
+        for route_config in config.routes {
+            match ActiveRoute::new(route_config) {
+                Ok(route) => active_routes.push(route),
+                Err(e) => {
+                    tracing::error!("❌ Error en configuración de ruta: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
 
         // 2. CACHÉ DE BANEOS: Usamos Moka con la política de expiración personalizada.
@@ -115,7 +117,7 @@ impl AppState {
             backend_host_header,
             whitelist_ips,
             whitelist_nets,
-            rules: active_rules,
+            routes: active_routes,
             ban_cache,
             client,
         })
