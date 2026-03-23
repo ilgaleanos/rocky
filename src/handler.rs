@@ -217,7 +217,7 @@ pub async fn firewall_handler(
     }
 
     // MEJORA: Streaming puro de subida
-    let req_body = reqwest::Body::wrap_stream(axum::body::Body::new(body).into_data_stream());
+    let req_body = reqwest::Body::wrap_stream(body.into_data_stream());
 
     let proxy_req = state
         .client
