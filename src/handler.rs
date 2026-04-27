@@ -92,14 +92,25 @@ pub async fn firewall_handler(
     // Desarmamos el request para tomar ownership sin clonar
     let (parts, body) = req.into_parts();
     let raw_path = parts.uri.path();
+    let clean_path = raw_path.trim_start_matches('/');
 
-    // Normalizamos el path para el matching (limpieza de slash final)
-    let match_path = if raw_path.len() > 1 && raw_path.ends_with('/') {
-        &raw_path[..raw_path.len() - 1]
-    } else {
-        raw_path
-    };
-    let path_segments = crate::limiter::PathPattern::split_segments(match_path);
+    // Normalizamos el path ANTES de evaluar las reglas,
+    // para evitar que solicitudes como `/foo/../login` salten las reglas de `/login`.
+    let normalized_path: String = clean_path
+        .split('/')
+        .fold(Vec::new(), |mut parts, segment| {
+            match segment {
+                ".." => {
+                    parts.pop();
+                }
+                "." | "" => {}
+                s => parts.push(s),
+            }
+            parts
+        })
+        .join("/");
+
+    let path_segments = crate::limiter::PathPattern::split_segments(&normalized_path);
     let query = parts.uri.query().unwrap_or("");
     let method = parts.method;
     let mut headers = parts.headers;
@@ -181,26 +192,7 @@ pub async fn firewall_handler(
         headers.insert("host", hv.clone());
     }
 
-    // --- 2. LÓGICA DEL PROXY REVERSO (Con Streaming y Fix de URL) ---
-
-    // FIX 2: Evitamos la doble barra "/" limpiando el final de la URL del backend
     let base_url = state.backend_url.trim_end_matches('/');
-    let clean_path = raw_path.trim_start_matches('/');
-
-    // FIX SSRF: Normalizamos el path para evitar path traversal (/../)
-    let normalized_path: String = clean_path
-        .split('/')
-        .fold(Vec::new(), |mut parts, segment| {
-            match segment {
-                ".." => {
-                    parts.pop();
-                }
-                "." | "" => {}
-                s => parts.push(s),
-            }
-            parts
-        })
-        .join("/");
 
     let mut backend_url = String::with_capacity(
         base_url.len()
