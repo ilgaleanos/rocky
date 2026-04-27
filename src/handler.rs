@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 // Lista de cabeceras Hop-by-Hop que no deben cruzar el proxy ---
 const HOP_BY_HOP_HEADERS: &[&str] = &[
@@ -19,33 +19,43 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
+/// Extrae los tokens del header Connection que indican headers hop-by-hop
+/// adicionales para esta conexión (RFC 7230 §6.1).
+fn parse_connection_tokens(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get("connection")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty() && !HOP_BY_HOP_HEADERS.contains(&t.as_str()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn clean_hop_by_hop_headers(headers: &mut HeaderMap) {
+    // Extraer tokens dinámicos del Connection header ANTES de removerlo
+    let dynamic_tokens = parse_connection_tokens(headers);
     for header in HOP_BY_HOP_HEADERS {
         headers.remove(*header);
+    }
+    for token in dynamic_tokens {
+        headers.remove(&token);
     }
 }
 
 // --- PROTECCIÓN CONTRA IP SPOOFING (Capa de Confianza) ---
 
-/// Determina si una IP pertenece a una red de confianza (infraestructura propia o de Google).
-fn is_ip_trusted(ip: &std::net::IpAddr) -> bool {
-    ip.is_loopback()
-        || match ip {
-            std::net::IpAddr::V4(ipv4) => ipv4.is_private() || ipv4.is_link_local(),
-            std::net::IpAddr::V6(ipv6) => {
-                ipv6.is_loopback()
-                    || (ipv6.segments()[0] & 0xffc0) == 0xfe80 // link-local
-                    || (ipv6.segments()[0] & 0xfe00) == 0xfc00 // unique-local
-            }
-        }
-}
-
 /// Obtiene la IP real del cliente evitando suplantaciones en entornos con proxies (Cloud Run/GFE).
-fn get_real_ip(headers: &HeaderMap, socket_addr: &SocketAddr) -> String {
+/// Solo confía en X-Forwarded-For/X-Real-IP cuando el socket viene de un proxy
+/// explícitamente configurado en `trusted_proxies` (o loopback).
+fn get_real_ip(headers: &HeaderMap, socket_addr: &SocketAddr, state: &AppState) -> String {
     let direct_ip = socket_addr.ip();
 
-    // Si la conexión NO viene de un proxy interno, la IP directa es la real.
-    if !is_ip_trusted(&direct_ip) {
+    // Si la conexión NO viene de un proxy de confianza configurado, la IP directa
+    // es la real. Cualquier XFF/X-Real-IP que envíe el cliente es falsificable.
+    if !state.is_proxy_trusted(&direct_ip) {
         return direct_ip.to_string();
     }
 
@@ -60,7 +70,8 @@ fn get_real_ip(headers: &HeaderMap, socket_addr: &SocketAddr) -> String {
     }
 
     // 2. Seguridad: X-Forwarded-For con Búsqueda Reversa de Confianza.
-    // Cloud Run/GCP añaden IPs al FINAL. El cliente real es el último que NO es de Google.
+    // Recorremos de derecha a izquierda saltando las IPs que coinciden con
+    // proxies configurados; la primera IP fuera de esa lista es el cliente.
     if let Some(x_forwarded) = headers.get("x-forwarded-for") {
         if let Ok(ip_str) = x_forwarded.to_str() {
             let real_ip = ip_str
@@ -68,16 +79,14 @@ fn get_real_ip(headers: &HeaderMap, socket_addr: &SocketAddr) -> String {
                 .rev()
                 .map(|s| s.trim())
                 .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
-                .find(|ip| !is_ip_trusted(ip));
+                .find(|ip| !state.is_proxy_trusted(ip));
 
             if let Some(ip) = real_ip {
                 return ip.to_string();
             }
 
-            // Fallback: Si todos son internos, tomamos el extremo izquierdo.
-            if let Some(first) = ip_str.split(',').next() {
-                return first.trim().to_string();
-            }
+            // Fallback: si todas las IPs parseables son proxies confiables,
+            // devolvemos la IP directa en vez de un string sin validar.
         }
     }
 
@@ -92,13 +101,42 @@ pub async fn firewall_handler(
     // Desarmamos el request para tomar ownership sin clonar
     let (parts, body) = req.into_parts();
     let raw_path = parts.uri.path();
-    let clean_path = raw_path.trim_start_matches('/');
+
+    // Decodificamos URL ANTES de normalizar para que %2e%2e (..) y %2f (/)
+    // se interpreten igual que lo hará el backend. Sin esto, el firewall
+    // ve segmentos crudos y el backend ve la ruta resuelta → bypass.
+    let decoded_path = percent_encoding::percent_decode_str(raw_path)
+        .decode_utf8_lossy();
+    // Si el path contiene bytes no-UTF8, decode_utf8_lossy los reemplaza con
+    // U+FFFD. El backend interpreta esos bytes de forma diferente al firewall,
+    // permitiendo eludir las reglas. Rechazamos estos paths de forma segura.
+    if decoded_path.contains('\u{FFFD}') {
+        return Ok((StatusCode::BAD_REQUEST, "Invalid UTF-8 in path").into_response());
+    }
+    // %00 decodifica a NULL válido UTF-8. El cache_key usa '\0' como separador
+    // de campos, por lo que un null en el path puede colisionar campos. Además,
+    // muchos backends tratan NULL como terminador de string (path traversal).
+    if decoded_path.contains('\0') {
+        return Ok((StatusCode::BAD_REQUEST, "Null byte in path").into_response());
+    }
+    // IIS/.NET interpretan '\' como separador de path. /admin\auth se resolvería
+    // a /admin/auth en backend pero el firewall ve un solo segmento "admin\auth".
+    // Normalizamos para que el matching coincida con la interpretación del backend.
+    let decoded_path = if decoded_path.contains('\\') {
+        std::borrow::Cow::Owned(decoded_path.replace('\\', "/"))
+    } else {
+        decoded_path
+    };
+    let clean_path = decoded_path.trim_start_matches('/');
 
     // Normalizamos el path ANTES de evaluar las reglas,
     // para evitar que solicitudes como `/foo/../login` salten las reglas de `/login`.
+    // También truncamos cada segmento en `;` para prevenir bypass en backends
+    // que procesan path params (Tomcat, Jetty, WSGI: /admin/auth;jsessionid=x).
     let normalized_path: String = clean_path
         .split('/')
         .fold(Vec::new(), |mut parts, segment| {
+            let segment = segment.split(';').next().unwrap_or("");
             match segment {
                 ".." => {
                     parts.pop();
@@ -114,7 +152,7 @@ pub async fn firewall_handler(
     let query = parts.uri.query().unwrap_or("");
     let method = parts.method;
     let mut headers = parts.headers;
-    let client_ip = get_real_ip(&headers, &socket_addr);
+    let client_ip = get_real_ip(&headers, &socket_addr, &state);
 
     // --- 1. LÓGICA DEL FIREWALL (Rate limiting y baneos) ---
     // Se evalúa ANTES de modificar headers para que header:X use valores originales del cliente
@@ -143,34 +181,39 @@ pub async fn firewall_handler(
                         } else if id.starts_with("header:") {
                             let header_name = id.trim_start_matches("header:");
                             if let Some(val) = headers.get(header_name) {
-                                full_cache_key.push_str(val.to_str().unwrap_or(""));
+                                if let Ok(s) = val.to_str() {
+                                    full_cache_key.push_str(s);
+                                }
                             }
                         }
                         full_cache_key.push('\0');
                     }
 
                     if let Some(ban_duration) = state.ban_cache.get(&full_cache_key).await {
-                        warn!(
-                            "Bloqueado por baneo activo (configuración original: {:?}): {}",
-                            ban_duration, full_cache_key
+                        // No loggeamos full_cache_key: puede contener valores de headers
+                        // sensibles (Authorization). Solo route + ip.
+                        debug!(
+                            "Bloqueado por baneo activo (duración: {:?}) ruta={} ip={}",
+                            ban_duration, route.path, client_ip
                         );
                         return Ok((StatusCode::TOO_MANY_REQUESTS, "").into_response());
                     }
 
                     if rule.limiter.check_key(&full_cache_key).is_err() {
                         let ban_secs = rule.config.on_limit_exceeded.duration_secs;
-                        info!(
-                            "Rate limit excedido para: {}. Baneando por {}s",
-                            full_cache_key, ban_secs
+                        debug!(
+                            "Rate limit excedido ruta={} ip={}. Baneando por {}s",
+                            route.path, client_ip, ban_secs
                         );
 
-                        let duration = if ban_secs > 0 {
-                            Duration::from_secs(ban_secs)
-                        } else {
-                            Duration::from_secs(60 * 60 * 24 * 365 * 10)
-                        };
-
-                        state.ban_cache.insert(full_cache_key, duration).await;
+                        // ban_secs == 0 significa "sin baneo persistente": devolvemos 429
+                        // para este request pero no insertamos en ban_cache.
+                        if ban_secs > 0 {
+                            state
+                                .ban_cache
+                                .insert(full_cache_key, Duration::from_secs(ban_secs))
+                                .await;
+                        }
 
                         return Ok((StatusCode::TOO_MANY_REQUESTS, "").into_response());
                     }
@@ -184,7 +227,22 @@ pub async fn firewall_handler(
     clean_hop_by_hop_headers(&mut headers);
 
     if let Ok(ip_val) = axum::http::HeaderValue::from_str(&client_ip) {
-        headers.insert("x-forwarded-for", ip_val.clone());
+        // Solo appendeamos a la cadena existente si el socket viene de un proxy
+        // de confianza (Cloud Run/GFE, red interna). Si el cliente conectó directo
+        // desde internet, su X-Forwarded-For es falsificable y debe descartarse:
+        // appendearlo permitiría spoofing (ej. cliente envía "127.0.0.1" y backends
+        // que confían en left-most lo ven como loopback).
+        let new_forwarded = if state.is_proxy_trusted(&socket_addr.ip()) {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .map(|existing| format!("{}, {}", existing, client_ip))
+                .and_then(|v| axum::http::HeaderValue::from_str(&v).ok())
+                .unwrap_or_else(|| ip_val.clone())
+        } else {
+            ip_val.clone()
+        };
+        headers.insert("x-forwarded-for", new_forwarded);
         headers.insert("x-real-ip", ip_val);
     }
 
@@ -194,15 +252,19 @@ pub async fn firewall_handler(
 
     let base_url = state.backend_url.trim_end_matches('/');
 
+    // Reenviamos el path ORIGINAL (crudo) al backend, no el normalizado/decodificado,
+    // para preservar la semántica que esperaba el cliente. La normalización solo
+    // se usa para evaluar las reglas del firewall.
+    let forward_path = raw_path.trim_start_matches('/');
     let mut backend_url = String::with_capacity(
         base_url.len()
             + 1
-            + normalized_path.len()
+            + forward_path.len()
             + if query.is_empty() { 0 } else { 1 + query.len() },
     );
     backend_url.push_str(base_url);
     backend_url.push('/');
-    backend_url.push_str(&normalized_path);
+    backend_url.push_str(forward_path);
     if !query.is_empty() {
         backend_url.push('?');
         backend_url.push_str(query);
@@ -221,9 +283,14 @@ pub async fn firewall_handler(
         Ok(res) => {
             let mut response_builder = Response::builder().status(res.status());
 
-            // FIX 3: Filtramos cabeceras hop-by-hop del backend sin clonar
+            // FIX 3: Filtramos cabeceras hop-by-hop del backend sin clonar,
+            // incluyendo tokens dinámicos del header Connection (RFC 7230).
+            let response_dynamic_tokens = parse_connection_tokens(res.headers());
             for (key, value) in res.headers().iter() {
-                if !HOP_BY_HOP_HEADERS.contains(&key.as_str()) {
+                let key_str = key.as_str().to_lowercase();
+                if !HOP_BY_HOP_HEADERS.contains(&key_str.as_str())
+                    && !response_dynamic_tokens.contains(&key_str)
+                {
                     response_builder = response_builder.header(key, value);
                 }
             }
@@ -232,7 +299,9 @@ pub async fn firewall_handler(
             let stream = res.bytes_stream();
             let body = axum::body::Body::from_stream(stream);
 
-            Ok(response_builder.body(body).unwrap())
+            Ok(response_builder
+                .body(body)
+                .unwrap_or_else(|_| (StatusCode::BAD_GATEWAY, "error building response").into_response()))
         }
         Err(e) => {
             warn!("Error conectando al backend: {}", e);

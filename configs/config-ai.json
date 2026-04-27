@@ -1,6 +1,7 @@
 {
   "backend_url": "http://localhost:8080",
   "global_whitelist": [],
+  "trusted_proxies": [],
   "routes": [
     {
       "path": "/admin/auth/**",

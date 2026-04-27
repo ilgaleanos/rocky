@@ -19,9 +19,22 @@ pub enum PathPattern {
 }
 
 impl PathPattern {
-    pub fn compile(path: &str) -> Self {
+    pub fn compile(path: &str) -> Result<Self, String> {
+        // Rechazar wildcards en medio del patrón. Solo se permiten al final:
+        // /api/auth/*  (un nivel)  o  /api/auth/**  (recursivo) o /** (todo)
+        if path.contains('*')
+            && !path.ends_with("/*")
+            && !path.ends_with("/**")
+            && path != "/**"
+        {
+            return Err(format!(
+                "Patrón '{}' inválido: los wildcards solo se admiten al final como /* o /**",
+                path
+            ));
+        }
+
         if path == "/**" {
-            PathPattern::GlobWild(Vec::new())
+            Ok(PathPattern::GlobWild(Vec::new()))
         } else if path.ends_with("/**") {
             let prefix = path.trim_end_matches("/**");
             let segments = prefix
@@ -29,7 +42,7 @@ impl PathPattern {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect();
-            PathPattern::GlobWild(segments)
+            Ok(PathPattern::GlobWild(segments))
         } else if path.ends_with("/*") {
             let prefix = path.trim_end_matches("/*");
             let segments = prefix
@@ -37,14 +50,14 @@ impl PathPattern {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect();
-            PathPattern::SingleWild(segments)
+            Ok(PathPattern::SingleWild(segments))
         } else {
             let segments = path
                 .split('/')
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect();
-            PathPattern::Exact(segments)
+            Ok(PathPattern::Exact(segments))
         }
     }
 
@@ -102,7 +115,15 @@ impl ActiveRule {
         // Governor recarga tokens a un ritmo constante. Para permitir `limit`
         // peticiones distribuidas en `window_secs`, el tiempo entre recargas debe ser:
         // window_secs / limit
-        let interval_nanos = (config.window_secs * 1_000_000_000) / (config.limit as u64);
+        let total_nanos = (config.window_secs as u128) * 1_000_000_000u128;
+        let interval_nanos = total_nanos / (config.limit as u128);
+        if interval_nanos == 0 || interval_nanos > u64::MAX as u128 {
+            return Err(format!(
+                "Configuración inválida en ruta '{}': window_secs={} limit={} produce intervalo fuera de rango",
+                route_path, config.window_secs, config.limit
+            ));
+        }
+        let interval_nanos = interval_nanos as u64;
 
         let quota = Quota::with_period(Duration::from_nanos(interval_nanos))
             .ok_or_else(|| {
@@ -128,7 +149,7 @@ pub struct ActiveRoute {
 
 impl ActiveRoute {
     pub fn new(config: RouteConfig) -> Result<Self, String> {
-        let pattern = PathPattern::compile(&config.path);
+        let pattern = PathPattern::compile(&config.path)?;
         let mut rules = Vec::new();
         for rule_config in config.rules {
             rules.push(ActiveRule::new(rule_config, &config.path)?);

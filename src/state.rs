@@ -45,9 +45,21 @@ pub struct AppState {
     pub backend_host_header: Option<axum::http::HeaderValue>,
     pub whitelist_ips: HashSet<IpAddr>,
     pub whitelist_nets: Vec<IpNet>,
+    pub trusted_proxy_ips: HashSet<IpAddr>,
+    pub trusted_proxy_nets: Vec<IpNet>,
     pub routes: Vec<ActiveRoute>,
     pub ban_cache: Cache<String, Duration>,
     pub client: reqwest::Client,
+}
+
+impl AppState {
+    /// Indica si una IP corresponde a un proxy de confianza configurado.
+    /// Loopback siempre se considera trusted (health checks locales / sidecars).
+    pub fn is_proxy_trusted(&self, ip: &IpAddr) -> bool {
+        ip.is_loopback()
+            || self.trusted_proxy_ips.contains(ip)
+            || self.trusted_proxy_nets.iter().any(|n| n.contains(ip))
+    }
 }
 
 impl AppState {
@@ -66,8 +78,13 @@ impl AppState {
         }
 
         // 2. CACHÉ DE BANEOS: Usamos Moka con la política de expiración personalizada.
+        // Capacidad alta para mitigar eviction attack: un atacante que rota valores
+        // de header (ej. tokens Authorization únicos) llenaría el cache y podría
+        // evictar baneos legítimos. Moka usa TinyLFU, que es resistente a scan
+        // attacks (priorizando entradas frecuentemente accedidas), pero la cota
+        // máxima sigue importando bajo presión sostenida. ~500k ≈ 50-100 MB.
         let ban_cache: Cache<String, Duration> = Cache::builder()
-            .max_capacity(70_000)
+            .max_capacity(500_000)
             .expire_after(BanExpiry)
             .build();
 
@@ -86,6 +103,31 @@ impl AppState {
                     Err(e) => tracing::warn!("⚠️ IP inválida en whitelist '{}': {}", ip_str, e),
                 }
             }
+        }
+
+        // 3.b TRUSTED PROXIES: lista explícita de proxies cuya cadena XFF/X-Real-IP
+        // es confiable. Sin esto, atacantes desde redes privadas pueden falsificar
+        // su IP. Loopback se asume trusted aparte (manejado en is_proxy_trusted).
+        let mut trusted_proxy_ips = HashSet::new();
+        let mut trusted_proxy_nets = Vec::new();
+        for ip_str in &config.trusted_proxies {
+            if ip_str.contains('/') {
+                match ip_str.parse::<IpNet>() {
+                    Ok(net) => trusted_proxy_nets.push(net),
+                    Err(e) => tracing::warn!("⚠️ CIDR inválido en trusted_proxies '{}': {}", ip_str, e),
+                }
+            } else {
+                match ip_str.parse::<IpAddr>() {
+                    Ok(ip) => { trusted_proxy_ips.insert(ip); }
+                    Err(e) => tracing::warn!("⚠️ IP inválida en trusted_proxies '{}': {}", ip_str, e),
+                }
+            }
+        }
+        if config.trusted_proxies.is_empty() {
+            tracing::warn!(
+                "⚠️ trusted_proxies vacío: se ignorarán todos los X-Forwarded-For/X-Real-IP. \
+                 Si estás detrás de un LB, los clientes aparecerán como la IP del LB."
+            );
         }
 
         // 4. CLIENTE HTTP PROFESIONAL: Configuración con Timeouts y Pool de conexiones.
@@ -112,11 +154,28 @@ impl AppState {
             })
             .and_then(|h| axum::http::HeaderValue::from_str(&h).ok());
 
+        // Si no se pudo derivar el Host del backend, no arrancamos:
+        // el Host del cliente se reenviaría al backend, permitiendo SSRF/
+        // routing hijack en backends con vhost. Mejor fallar al inicio.
+        let backend_host_header = match backend_host_header {
+            Some(h) => h,
+            None => {
+                tracing::error!(
+                    "❌ No se pudo derivar Host header de backend_url '{}'. \
+                     Verifica que la URL sea válida (ej. http://backend:8080)",
+                    config.backend_url
+                );
+                std::process::exit(1);
+            }
+        };
+
         Arc::new(Self {
             backend_url: config.backend_url,
-            backend_host_header,
+            backend_host_header: Some(backend_host_header),
             whitelist_ips,
             whitelist_nets,
+            trusted_proxy_ips,
+            trusted_proxy_nets,
             routes: active_routes,
             ban_cache,
             client,

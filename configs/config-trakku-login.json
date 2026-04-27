@@ -1,6 +1,7 @@
 {
   "backend_url": "http://localhost:8080",
-  "global_whitelist": ["127.0.0.1", "169.254.0.0/16", "::1"],
+  "global_whitelist": [],
+  "trusted_proxies": ["127.0.0.1", "169.254.0.0/16", "::1"],
   "routes": [
     {
       "path": "/v1/apagado_qr_generar",
