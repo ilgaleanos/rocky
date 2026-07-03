@@ -47,6 +47,7 @@ pub struct AppState {
     pub whitelist_nets: Vec<IpNet>,
     pub trusted_proxy_ips: HashSet<IpAddr>,
     pub trusted_proxy_nets: Vec<IpNet>,
+    pub trusted_hops: Option<usize>,
     pub routes: Vec<ActiveRoute>,
     pub ban_cache: Cache<String, Duration>,
     pub client: reqwest::Client,
@@ -123,11 +124,23 @@ impl AppState {
                 }
             }
         }
-        if config.trusted_proxies.is_empty() {
-            tracing::warn!(
-                "⚠️ trusted_proxies vacío: se ignorarán todos los X-Forwarded-For/X-Real-IP. \
-                 Si estás detrás de un LB, los clientes aparecerán como la IP del LB."
-            );
+        // El warning de trusted_proxies vacío solo aplica en modo bare-metal.
+        // En modo plataforma (trusted_hops) la IP se deriva por posición del XFF.
+        match config.trusted_hops {
+            Some(hops) => {
+                tracing::info!(
+                    "🛰️  Modo plataforma activo: IP del cliente = XFF a {} hop(s) desde el final.",
+                    hops
+                );
+            }
+            None if config.trusted_proxies.is_empty() => {
+                tracing::warn!(
+                    "⚠️ trusted_proxies vacío y trusted_hops null: se ignorarán todos los \
+                     X-Forwarded-For/X-Real-IP. Si estás detrás de un LB/Cloud Run, los clientes \
+                     aparecerán como la IP del proxy. Configura trusted_hops (Cloud Run directo = 0)."
+                );
+            }
+            None => {}
         }
 
         // 4. CLIENTE HTTP PROFESIONAL: Configuración con Timeouts y Pool de conexiones.
@@ -137,6 +150,11 @@ impl AppState {
             .pool_idle_timeout(Duration::from_secs(90)) // Reutilizar conexiones para bajar latencia.
             .tcp_nodelay(true) // Optimizar para baja latencia (desactiva algoritmo de Nagle).
             .danger_accept_invalid_certs(false) // Mantener seguridad SSL estricta.
+            // SSRF: no seguir redirects del backend. Un proxy debe REENVIAR el
+            // 3xx al cliente, no resolverlo. Si el backend tiene un open-redirect
+            // o está comprometido, seguir redirects permitiría fetchear metadata
+            // interna (169.254.169.254) u otros servicios de la red del proxy.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("No se pudo inicializar el cliente HTTP");
 
@@ -176,6 +194,7 @@ impl AppState {
             whitelist_nets,
             trusted_proxy_ips,
             trusted_proxy_nets,
+            trusted_hops: config.trusted_hops,
             routes: active_routes,
             ban_cache,
             client,

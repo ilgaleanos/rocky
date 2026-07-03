@@ -19,6 +19,26 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
+// Cabeceras que transportan la IP del cliente y son FALSIFICABLES por quien
+// conecta directo al proxy. Las eliminamos antes de reenviar para que el
+// backend no confíe en un valor spoofeado. NO incluimos x-forwarded-for ni
+// x-real-ip: esos los gestiona la lógica de append más abajo (que ya decide
+// según la confianza del socket si preserva la cadena o la reemplaza).
+const CLIENT_IP_HEADERS: &[&str] = &[
+    "forwarded",         // RFC 7239
+    "x-client-ip",
+    "true-client-ip",    // Akamai/Cloudflare Enterprise
+    "cf-connecting-ip",  // Cloudflare
+    "fastly-client-ip",  // Fastly
+    "x-cluster-client-ip",
+];
+
+fn clean_client_ip_headers(headers: &mut HeaderMap) {
+    for header in CLIENT_IP_HEADERS {
+        headers.remove(*header);
+    }
+}
+
 /// Extrae los tokens del header Connection que indican headers hop-by-hop
 /// adicionales para esta conexión (RFC 7230 §6.1).
 fn parse_connection_tokens(headers: &HeaderMap) -> Vec<String> {
@@ -53,6 +73,31 @@ fn clean_hop_by_hop_headers(headers: &mut HeaderMap) {
 fn get_real_ip(headers: &HeaderMap, socket_addr: &SocketAddr, state: &AppState) -> String {
     let direct_ip = socket_addr.ip();
 
+    // --- MODO PLATAFORMA (Cloud Run / LB gestionado) ---
+    // No se puede enumerar el rango de IPs del ingress de Google, así que el
+    // modelo por-socket no sirve. En su lugar contamos posiciones desde la
+    // DERECHA del X-Forwarded-For: el ingress añade `trusted_hops` entradas
+    // reales al final, de modo que la IP del cliente está en `len-1-hops`.
+    // Todo lo que el cliente falsifique queda a la izquierda de esa posición y
+    // se ignora → inmune a spoofing y a bypass de whitelist.
+    if let Some(hops) = state.trusted_hops {
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            // Contamos sobre los tokens crudos (no filtramos parseables) para no
+            // desplazar la posición anclada a la derecha. Solo parseamos el target.
+            let tokens: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
+            if tokens.len() > hops {
+                let candidate = tokens[tokens.len() - 1 - hops];
+                if let Ok(ip) = candidate.parse::<std::net::IpAddr>() {
+                    return ip.to_string();
+                }
+            }
+        }
+        // XFF ausente o más corto de lo esperado (petición que no cruzó el
+        // ingress esperado): no confiamos en nada spoofeable, usamos el socket.
+        return direct_ip.to_string();
+    }
+
+    // --- MODO BARE-METAL (trusted_proxies por IP de socket) ---
     // Si la conexión NO viene de un proxy de confianza configurado, la IP directa
     // es la real. Cualquier XFF/X-Real-IP que envíe el cliente es falsificable.
     if !state.is_proxy_trusted(&direct_ip) {
@@ -102,11 +147,47 @@ pub async fn firewall_handler(
     let (parts, body) = req.into_parts();
     let raw_path = parts.uri.path();
 
+    // TRANSPARENCIA: reenviamos el path EXACTO del cliente (raw_path) al backend,
+    // así que NO podemos reescribirlo para desambiguar. Por eso rechazamos slash
+    // y backslash codificados (%2f/%5c): el firewall los decodifica para matchear
+    // pero el backend puede tratarlos como literales dentro de un segmento, con lo
+    // que ambos segmentan el path distinto → bypass de reglas. Rechazarlos elimina
+    // la ambigüedad sin alterar el resto del tráfico legítimo.
+    if raw_path.contains("%2f")
+        || raw_path.contains("%2F")
+        || raw_path.contains("%5c")
+        || raw_path.contains("%5C")
+    {
+        return Ok((StatusCode::BAD_REQUEST, "Encoded slash/backslash in path").into_response());
+    }
+
     // Decodificamos URL ANTES de normalizar para que %2e%2e (..) y %2f (/)
     // se interpreten igual que lo hará el backend. Sin esto, el firewall
     // ve segmentos crudos y el backend ve la ruta resuelta → bypass.
-    let decoded_path = percent_encoding::percent_decode_str(raw_path)
-        .decode_utf8_lossy();
+    //
+    // Decodificación ITERATIVA: un atacante puede doble-codificar (%252e → %2e
+    // → .) para que el firewall vea bytes crudos mientras el backend, tras
+    // decodificar dos veces, resuelva `..` o `/`. Decodificamos hasta que el
+    // path se estabilice; así evaluamos las reglas sobre la forma que el backend
+    // realmente resolverá. Si no estabiliza en unas pocas pasadas, el path está
+    // anidado de forma sospechosa y lo rechazamos.
+    const MAX_DECODE_PASSES: usize = 5;
+    let mut decoded = raw_path.to_string();
+    let mut stabilized = false;
+    for _ in 0..MAX_DECODE_PASSES {
+        let next = percent_encoding::percent_decode_str(&decoded)
+            .decode_utf8_lossy()
+            .into_owned();
+        if next == decoded {
+            stabilized = true;
+            break;
+        }
+        decoded = next;
+    }
+    if !stabilized {
+        return Ok((StatusCode::BAD_REQUEST, "Path too deeply encoded").into_response());
+    }
+    let decoded_path: std::borrow::Cow<str> = std::borrow::Cow::Owned(decoded);
     // Si el path contiene bytes no-UTF8, decode_utf8_lossy los reemplaza con
     // U+FFFD. El backend interpreta esos bytes de forma diferente al firewall,
     // permitiendo eludir las reglas. Rechazamos estos paths de forma segura.
@@ -178,11 +259,20 @@ pub async fn firewall_handler(
                             full_cache_key.push_str("GLOBAL");
                         } else if id == "ip" {
                             full_cache_key.push_str(&client_ip);
-                        } else if id.starts_with("header:") {
-                            let header_name = id.trim_start_matches("header:");
-                            if let Some(val) = headers.get(header_name) {
+                        } else if let Some(header_name) = id.strip_prefix("header:") {
+                            // Un header puede repetirse; concatenamos TODOS sus
+                            // valores (con separador) para que la key sea
+                            // determinista. Con .get() solo se tomaba el primer
+                            // valor, así que un atacante podía añadir un segundo
+                            // valor para desplazar su bucket de rate-limit.
+                            let mut first = true;
+                            for val in headers.get_all(header_name).iter() {
                                 if let Ok(s) = val.to_str() {
+                                    if !first {
+                                        full_cache_key.push('\u{1f}'); // unit separator
+                                    }
                                     full_cache_key.push_str(s);
+                                    first = false;
                                 }
                             }
                         }
@@ -225,6 +315,10 @@ pub async fn firewall_handler(
 
     // --- 2. Preparación de headers para el proxy (DESPUÉS del rate limiting) ---
     clean_hop_by_hop_headers(&mut headers);
+    // Eliminamos cabeceras de IP-cliente falsificables (Forwarded, True-Client-IP,
+    // CF-Connecting-IP, etc.) para que el backend no confíe en un valor spoofeado.
+    // x-forwarded-for / x-real-ip se reponen justo debajo con el valor calculado.
+    clean_client_ip_headers(&mut headers);
 
     if let Ok(ip_val) = axum::http::HeaderValue::from_str(&client_ip) {
         // Solo appendeamos a la cadena existente si el socket viene de un proxy

@@ -6,9 +6,10 @@ mod state;
 use crate::config::AppConfig;
 use crate::handler::firewall_handler;
 use crate::state::AppState;
-use axum::{extract::DefaultBodyLimit, http::StatusCode, routing::get, Router};
+use axum::{http::StatusCode, routing::get, Router};
 use std::net::SocketAddr;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
@@ -57,11 +58,21 @@ async fn main() {
         .route("/health", get(|| async { (StatusCode::OK, "OK") }))
         .fallback(firewall_handler)
         .with_state(state)
-        .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // Límite de 100 MB por request
+        // Límite de 100 MB por request. Usamos RequestBodyLimitLayer (no
+        // DefaultBodyLimit): este envuelve el Body real y corta el stream al
+        // superar el límite. DefaultBodyLimit solo actúa cuando un extractor
+        // (Bytes/Json) lo consulta, y este handler reenvía el body crudo por
+        // streaming sin extractor → el límite quedaría sin efecto.
+        .layer(RequestBodyLimitLayer::new(100 * 1024 * 1024))
         .layer(TraceLayer::new_for_http()) // Genera logs automáticos con tiempos de respuesta
         .layer(CatchPanicLayer::new()); // Evita que un error inesperado tire el servidor
 
-    let port = 9090;
+    // Cloud Run (y otros PaaS) inyectan el puerto vía $PORT y esperan que el
+    // contenedor escuche ahí. Fallback a 9090 para ejecución local/bare-metal.
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(9090);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

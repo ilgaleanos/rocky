@@ -29,8 +29,17 @@ pub struct AppConfig {
     /// X-Real-IP de conexiones que vengan desde estas IPs son considerados
     /// confiables. Loopback siempre se considera trusted (health checks).
     /// Si está vacío, se ignoran TODOS los headers de IP del cliente.
+    /// Solo se usa cuando `trusted_hops` es null (modo bare-metal).
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    /// MODO PLATAFORMA (Cloud Run / Load Balancer gestionado). Número de proxies
+    /// de confianza que el ingress AÑADE al final del X-Forwarded-For. La IP real
+    /// del cliente es la que está a `trusted_hops` posiciones desde el final, así
+    /// que el cliente no puede falsificarla (solo controla lo que hay a la
+    /// izquierda). Valores típicos: Cloud Run directo = 0, LB HTTPS externo = 1.
+    /// Si es null, se usa el modelo `trusted_proxies` basado en la IP del socket.
+    #[serde(default)]
+    pub trusted_hops: Option<usize>,
     pub routes: Vec<RouteConfig>,
 }
 
