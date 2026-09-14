@@ -254,6 +254,7 @@ pub async fn firewall_handler(
                     );
                     full_cache_key.push_str(&route.path);
                     full_cache_key.push('\0');
+                    let mut unresolved_identifier = false;
                     for id in &rule.config.identifiers {
                         if id == "*" {
                             full_cache_key.push_str("GLOBAL");
@@ -275,8 +276,21 @@ pub async fn firewall_handler(
                                     first = false;
                                 }
                             }
+                            if first {
+                                unresolved_identifier = true;
+                            }
                         }
                         full_cache_key.push('\0');
+                    }
+
+                    // Si un identificador no se puede resolver, la key sale idéntica para
+                    // todos los clientes y la regla deja de ser por cliente: se vuelve un
+                    // bucket global que cualquiera puede saturar para denegar el servicio a
+                    // todo el mundo. El caso real es el preflight CORS, que el navegador
+                    // envía sin Authorization. Omitimos la regla; la ruta sigue cubierta por
+                    // las reglas que se identifican por IP.
+                    if unresolved_identifier {
+                        continue;
                     }
 
                     if let Some(ban_duration) = state.ban_cache.get(&full_cache_key).await {
