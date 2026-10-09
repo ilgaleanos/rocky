@@ -31,3 +31,7 @@ tower-http = { version = "0.6.8", features = ["trace", "catch-panic", "limit"] }
 ipnet = "2.11.0"
 url = "2"
 percent-encoding = "2.3"
+
+[dev-dependencies]
+# Tests de integración: oneshot sobre el router sin abrir un puerto
+tower = { version = "0.5", features = ["util"] }

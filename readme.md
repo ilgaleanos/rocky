@@ -68,8 +68,8 @@ Toda la lógica de protección se define en un archivo JSON fácil de leer.
 * `global_whitelist`: Lista de direcciones IP que saltarán **todas** las reglas del firewall (ideal para administradores o webhooks internos).
 * `path_prefix`: La ruta que activa la regla. Las reglas más largas/específicas se evalúan primero.
 * `identifiers`:
-* `"ip"`: El límite se aplica de forma individual a cada dirección IP del cliente.
-* `"header:nombre"`: El límite se aplica a un valor específico de una cabecera HTTP (ej. `header:authorization` para limitar por API Key).
+* `"ip"`: El límite se aplica de forma individual a cada dirección IP del cliente. Las IPv6 se agrupan por /64.
+* `"header:nombre"`: El límite se aplica a un valor específico de una cabecera HTTP (ej. `header:authorization` para limitar por API Key). Usa la primera línea de la cabecera, con los espacios normalizados, y se guarda como hash.
 * `"*"`: Un límite global para todo el servidor.
 
 

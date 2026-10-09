@@ -51,6 +51,9 @@ pub struct AppState {
     pub routes: Vec<ActiveRoute>,
     pub ban_cache: Cache<String, Duration>,
     pub client: reqwest::Client,
+    // Semilla aleatoria por proceso para hashear los headers usados como
+    // identificador: un atacante no puede fabricar valores que colisionen.
+    pub identity_hasher: std::hash::RandomState,
 }
 
 impl AppState {
@@ -83,9 +86,12 @@ impl AppState {
         // de header (ej. tokens Authorization únicos) llenaría el cache y podría
         // evictar baneos legítimos. Moka usa TinyLFU, que es resistente a scan
         // attacks (priorizando entradas frecuentemente accedidas), pero la cota
-        // máxima sigue importando bajo presión sostenida. ~500k ≈ 50-100 MB.
+        // máxima sigue importando bajo presión sostenida. Las keys son de tamaño
+        // fijo (el header va hasheado, la IPv6 agrupada por /64), así que ~100k ≈
+        // 10-20 MB. Con el contenedor en 128Mi, 500k (50-100 MB) no dejaba margen
+        // al resto del proceso.
         let ban_cache: Cache<String, Duration> = Cache::builder()
-            .max_capacity(500_000)
+            .max_capacity(100_000)
             .expire_after(BanExpiry)
             .build();
 
@@ -198,6 +204,7 @@ impl AppState {
             routes: active_routes,
             ban_cache,
             client,
+            identity_hasher: std::hash::RandomState::new(),
         })
     }
 }

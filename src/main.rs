@@ -2,12 +2,15 @@ mod config;
 mod handler;
 mod limiter;
 mod state;
+#[cfg(test)]
+mod tests;
 
 use crate::config::AppConfig;
 use crate::handler::firewall_handler;
 use crate::state::AppState;
 use axum::{http::StatusCode, routing::get, Router};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
@@ -38,10 +41,13 @@ async fn main() {
 
     // 4. TAREA DE LIMPIEZA DEL RATE LIMITER (anti memory-leak)
     // governor/DashMap no elimina keys antiguas automáticamente; retain_recent() poda las caducadas.
+    // Cada 10 s: retain_recent solo descarta keys cuyo estado ya es igual al de una
+    // key nueva, así que ninguna decisión de rate limit cambia; barrer seguido acota
+    // la memoria ante un flood que rota keys.
     {
         let state_for_cleanup = state.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
                 interval.tick().await;
                 for route in &state_for_cleanup.routes {
@@ -54,18 +60,7 @@ async fn main() {
     }
 
     // 5. ENRUTADOR
-    let app = Router::new()
-        .route("/health", get(|| async { (StatusCode::OK, "OK") }))
-        .fallback(firewall_handler)
-        .with_state(state)
-        // Límite de 100 MB por request. Usamos RequestBodyLimitLayer (no
-        // DefaultBodyLimit): este envuelve el Body real y corta el stream al
-        // superar el límite. DefaultBodyLimit solo actúa cuando un extractor
-        // (Bytes/Json) lo consulta, y este handler reenvía el body crudo por
-        // streaming sin extractor → el límite quedaría sin efecto.
-        .layer(RequestBodyLimitLayer::new(100 * 1024 * 1024))
-        .layer(TraceLayer::new_for_http()) // Genera logs automáticos con tiempos de respuesta
-        .layer(CatchPanicLayer::new()); // Evita que un error inesperado tire el servidor
+    let app = build_router(state);
 
     // Cloud Run (y otros PaaS) inyectan el puerto vía $PORT y esperan que el
     // contenedor escuche ahí. Fallback a 9090 para ejecución local/bare-metal.
@@ -88,6 +83,23 @@ async fn main() {
     .unwrap();
 
     info!("🛑 Firewall apagado correctamente.");
+}
+
+/// Construye el router completo (rutas, estado y capas). Está fuera de `main`
+/// para que los tests de integración monten exactamente el mismo router.
+fn build_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/health", get(|| async { (StatusCode::OK, "OK") }))
+        .fallback(firewall_handler)
+        .with_state(state)
+        // Límite de 100 MB por request. Usamos RequestBodyLimitLayer (no
+        // DefaultBodyLimit): este envuelve el Body real y corta el stream al
+        // superar el límite. DefaultBodyLimit solo actúa cuando un extractor
+        // (Bytes/Json) lo consulta, y este handler reenvía el body crudo por
+        // streaming sin extractor → el límite quedaría sin efecto.
+        .layer(RequestBodyLimitLayer::new(100 * 1024 * 1024))
+        .layer(TraceLayer::new_for_http()) // Genera logs automáticos con tiempos de respuesta
+        .layer(CatchPanicLayer::new()) // Evita que un error inesperado tire el servidor
 }
 
 /// Función que espera una señal de terminación (Ctrl+C o SIGTERM)
