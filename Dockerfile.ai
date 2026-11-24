@@ -4,7 +4,7 @@
 FROM rust:alpine AS builder
 
 # Agregamos openssl-libs-static
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
+RUN apk upgrade --no-cache && apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
 
 # Le decimos a la librería sys de Rust que compile OpenSSL de forma estática
 ENV OPENSSL_STATIC=1
@@ -21,7 +21,7 @@ RUN cargo build --release
 FROM alpine:3.21
 
 # Añadimos los certificados raíz para que reqwest pueda hacer peticiones HTTPS sin fallar
-RUN apk add --no-cache ca-certificates tzdata \
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates tzdata \
     && rm -rf /var/cache/apk/*
 
 WORKDIR /app
